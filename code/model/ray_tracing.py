@@ -29,6 +29,19 @@ class RayTracing(nn.Module):
                 object_mask,
                 ray_directions
                 ):
+        # Finds 3D points where the ray intersects the surface parametrized by the zero-level set of the sdf
+        # Args:
+        #   sdf: signed-distance function that parametrized the surface
+        #   cam_loc: center of the camera for each ray
+        #   ray_directions: direction of the rays that start at cam_location and should be evaluated
+        #   object_mask: binary mask that predicts if a ray intersects the surface. It is an input to the IDR
+        #                network that predicts intersections, not a hard constraint
+        # Returns
+        #   curr_start_points: 3d points where the ray intersects the surface
+        #   network_object_mask: boolean mask indicating if the ray has hit the surface
+        #   acc_start_dis: distance along the ray where the surface is intersected
+        # During training, if a ray does noyt hit the surface the value of curr_start_points and
+        # acc_start_dis corresponds to the point along the ray where the sdf has minimal value
 
         batch_size, num_pixels, _ = ray_directions.shape
 
@@ -85,6 +98,12 @@ class RayTracing(nn.Module):
         mask = (in_mask | out_mask) & mask_intersect
 
         if mask.sum() > 0:
+            # for pixels whose rays do not hit the object we want to compute a mask in a differentiable way.
+            # We use the minimal value of the SDF along the ray (positive for points that do not intersect the ray) passed
+            # throught a sigmoid to create a mask that we can used with automatic differentiation to define a loss between
+            # the ground-truth binary mask and the intersection of rays with the interior of a surface with an implicit parametrization
+            # for points outside network_object_mask, the value of curr_start_points and acc_start_points corresponds to the minimal
+            # value of the SDF along the ray
             min_dis[network_object_mask & out_mask] = acc_start_dis[network_object_mask & out_mask]
 
             min_mask_points, min_mask_dist = self.minimal_sdf_points(num_pixels, sdf, cam_loc, ray_directions, mask, min_dis, max_dis)

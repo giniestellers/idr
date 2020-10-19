@@ -8,13 +8,21 @@ class SampleNetwork(nn.Module):
     '''
 
     def forward(self, surface_output, surface_sdf_values, surface_points_grad, surface_dists, surface_cam_loc, surface_ray_dirs):
-        # t -> t(theta)
+        # Args:
+        #   surface_output:
+        #   surface_sdf_values:
+        #   surface_points_grad: gradient of implicit function f at current intersection point \nabla f(x_0, \theta_0)
+        #   surface_dists: distance along the ray to the surface (t_0 in the paper)
+        #   surface_cam_loc: camera centers (c in the paper)
+        #   surface_ray_dirs: direction of the rays (v in the paper)
+
+        # Compute t(\theta, c, v) = t_0 - f(c+t_0 v)/(\nabla f(x_0, \theta_0) \cdot v_0)
         surface_ray_dirs_0 = surface_ray_dirs.detach()
         surface_points_dot = torch.bmm(surface_points_grad.view(-1, 1, 3),
                                        surface_ray_dirs_0.view(-1, 3, 1)).squeeze(-1)
         surface_dists_theta = surface_dists - (surface_output - surface_sdf_values) / surface_points_dot
 
-        # t(theta) -> x(theta,c,v)
+        # x(theta,c,v) = c + (\theta, c, v) * v
         surface_points_theta_c_v = surface_cam_loc + surface_dists_theta * surface_ray_dirs
 
         return surface_points_theta_c_v
