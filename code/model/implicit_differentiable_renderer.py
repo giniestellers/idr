@@ -209,6 +209,16 @@ class IDRNetwork(nn.Module):
         sdf_output = self.implicit_network(points)[:, 0:1]
         ray_dirs = ray_dirs.reshape(-1, 3)
 
+        # during training, we need a differentiable way to find the location of the points where the rays
+        # emanating from each pixel intersect the surface and define the pixel RGB color. To use the paper
+        # first-order approximation, we need to compute
+        # x = c + (t_0 - f(c + t_0 v; \theta)/ \nabla f(x_0; \theta_0) \cdot v_0) v
+        # where
+        #   \theta_0 current network parameters
+        #   c_0 current estimate of camera center (as it depends on camera pose)
+        #   v_0 current estimate of ray direction (as it depends on current estimate of camera center)
+        #   t_0 current estimate of distance to the surface along each ray
+        #   x_0 = c_0 + t_0 v_0 current estimate of ray intersection (given by sphere tracing algorithm)
         if self.training:
             surface_mask = network_object_mask & object_mask
             surface_points = points[surface_mask]
