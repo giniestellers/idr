@@ -10,10 +10,10 @@ from model.sample_network import SampleNetwork
 class ImplicitNetwork(nn.Module):
     def __init__(
             self,
-            feature_vector_size,
-            d_in,
-            d_out,
-            dims,
+            feature_vector_size,# dimension of feature vector z that accounts for global illumination effects
+            d_in, # 3, dimension of the domain of the implicit function f that parametrizes the surface by its zero-level set
+            d_out, # 1, dimension of the values taken by implicit function f(x)
+            dims, # list with dimensions of MLP layers
             geometric_init=True,
             bias=1.0,
             skip_in=(),
@@ -21,10 +21,16 @@ class ImplicitNetwork(nn.Module):
             multires=0
     ):
         super().__init__()
-
+        # the implicit function f is extended to return a global feature
+        # vector z s.t. for each input coordinate x the network computes
+        # F(x) = [f(x), z(z)]. z accounts for global illumination effects that cannot
+        # be modelled by a rendering function M(x, n, v) that computes rgb
+        # values as a function of the surface point, normal, and viewind direction
         dims = [d_in] + dims + [d_out + feature_vector_size]
 
         self.embed_fn = None
+        # positional encoding uses a frequency decompositions of the input
+        # signal (xyz coordinates) to parametrize the input
         if multires > 0:
             embed_fn, input_ch = get_embedder(multires)
             self.embed_fn = embed_fn
@@ -65,6 +71,7 @@ class ImplicitNetwork(nn.Module):
         self.softplus = nn.Softplus(beta=100)
 
     def forward(self, input, compute_grad=False):
+        # given x,y,z coordinate, compute the value of the function at this location, F(x) = [f(x), z(z)]
         if self.embed_fn is not None:
             input = self.embed_fn(input)
 
@@ -84,6 +91,8 @@ class ImplicitNetwork(nn.Module):
         return x
 
     def gradient(self, x):
+        # given x,y,z coordinate, compute the value of the implicit function f at
+        # this location, that is, \nabla f (x) or the normal to the surface at point x
         x.requires_grad_(True)
         y = self.forward(x)[:,:1]
         d_output = torch.ones_like(y, requires_grad=False, device=y.device)
@@ -99,20 +108,26 @@ class ImplicitNetwork(nn.Module):
 class RenderingNetwork(nn.Module):
     def __init__(
             self,
-            feature_vector_size,
-            mode,
-            d_in,
-            d_out,
-            dims,
+            feature_vector_size, # dimension of feature vector z that accounts for global illumination effects
+            mode, # one of 'idr', 'no_view_dir', 'no_normal' that allows for different input sizes (d_in)
+            d_in, # 9 (idr) or 6 (no_view_dir, no_normal) dimension of input to the network that approximates the function that describes the color of a surfacepoint as a function of the surface point, normal, and viewing direction (3 for coordinate x, 3 for normal n, 3 for viewing direction v)
+            d_out,# 3 (for RGB output)
+            dims, # list with dimensions of internal MLP layers
             weight_norm=True,
             multires_view=0
     ):
         super().__init__()
 
         self.mode = mode
+        # the input to the rendering network is the location of the point in the surface x,
+        # the normal at this point n, and the viewing direction v, and a feature vector z(x)
+        # accounts for global illumination effects that cannot be modelled by a rendering
+        # function M(x, n, v) that computes rgb values as a function of x, n, and v only. The
+        # rendering network approximates a function M(x, n, v, z)
         dims = [d_in + feature_vector_size] + dims + [d_out]
 
         self.embedview_fn = None
+        # embedding for viewing direction v
         if multires_view > 0:
             embedview_fn, input_ch = get_embedder(multires_view)
             self.embedview_fn = embedview_fn
@@ -178,6 +193,9 @@ class IDRNetwork(nn.Module):
 
         batch_size, num_pixels, _ = ray_dirs.shape
 
+        # get location of approximate location of the intersection of each ray with
+        # direction v starting at camera center c with the surface x_0 = c + t_0 v, where
+        # t_0 (dists) is the distance to the surface along each ray and x_0 the intersection (points)
         self.implicit_network.eval()
         with torch.no_grad():
             points, network_object_mask, dists = self.ray_tracer(sdf=lambda x: self.implicit_network(x)[:, 0],
