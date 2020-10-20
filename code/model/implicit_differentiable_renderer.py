@@ -221,12 +221,16 @@ class IDRNetwork(nn.Module):
         #   x_0 = c_0 + t_0 v_0 current estimate of ray intersection (given by sphere tracing algorithm)
         if self.training:
             surface_mask = network_object_mask & object_mask
-            surface_points = points[surface_mask]
-            surface_dists = dists[surface_mask].unsqueeze(-1)
-            surface_ray_dirs = ray_dirs[surface_mask]
-            surface_cam_loc = cam_loc.unsqueeze(1).repeat(1, num_pixels, 1).reshape(-1, 3)[surface_mask]
-            surface_output = sdf_output[surface_mask]
+            surface_points = points[surface_mask] # x
+            surface_dists = dists[surface_mask].unsqueeze(-1) #t_0
+            surface_ray_dirs = ray_dirs[surface_mask] # v_0
+            surface_cam_loc = cam_loc.unsqueeze(1).repeat(1, num_pixels, 1).reshape(-1, 3)[surface_mask] # c
+            surface_output = sdf_output[surface_mask] # f(x)
             N = surface_points.shape[0]
+
+            output = self.implicit_network(surface_points) #f(x)
+            # dettach to get f(x_0) from f(x), which tells pytorch that the computation of f(x_0) is not tracked during construction of computational graph
+            surface_sdf_values = output[:N, 0:1].detach()
 
             # Sample points for the eikonal loss
             eik_bounding_box = self.object_bounding_sphere
@@ -234,23 +238,23 @@ class IDRNetwork(nn.Module):
             eikonal_points = torch.empty(n_eik_points, 3).uniform_(-eik_bounding_box, eik_bounding_box).cuda()
             eikonal_pixel_points = points.clone()
             eikonal_pixel_points = eikonal_pixel_points.detach()
-            eikonal_points = torch.cat([eikonal_points, eikonal_pixel_points], 0)
+            eikonal_points = torch.cat([eikonal_points, eikonal_pixel_points], 0) # x_bar
+            # x_bar, points where eikonal equation needs to be imposed to gurantee a SDF. We use all the points that are involved in computations
+            # plus a set of points randomly distributed in the sphere to guarantee SDF behavior in computations
 
-            points_all = torch.cat([surface_points, eikonal_points], dim=0)
-
-            output = self.implicit_network(surface_points)
-            surface_sdf_values = output[:N, 0:1].detach()
+            points_all = torch.cat([surface_points, eikonal_points], dim=0) # [x_0, x_bar]
 
             g = self.implicit_network.gradient(points_all)
-            surface_points_grad = g[:N, 0, :].clone().detach()
-            grad_theta = g[N:, 0, :]
+            # dettach to get \nabla f(x_0) from \nabla f(x), which tells pytorch that the computation of \nabla f(x_0) is not tracked during construction of computational graph
+            surface_points_grad = g[:N, 0, :].clone().detach() # \nabla f(x_0; \theta_0)
+            grad_theta = g[N:, 0, :] # \nabla f(x_bar) where x_bar = [points_uniformly_distributed_sphere, surface_points_or_with_minimal_sdf_along_ray]
 
-            differentiable_surface_points = self.sample_network(surface_output,
-                                                                surface_sdf_values,
-                                                                surface_points_grad,
-                                                                surface_dists,
-                                                                surface_cam_loc,
-                                                                surface_ray_dirs)
+            differentiable_surface_points = self.sample_network(surface_output, # f(x)
+                                                                surface_sdf_values,# f(x_0) dettached
+                                                                surface_points_grad,# \nabla f(x_0; \theta_0) dettached
+                                                                surface_dists, # t_0
+                                                                surface_cam_loc, # c
+                                                                surface_ray_dirs) # v
 
         else:
             surface_mask = network_object_mask
