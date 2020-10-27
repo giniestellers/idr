@@ -15,9 +15,9 @@ class SxSceneDataset(torch.utils.data.Dataset):
     """Dataset for a class of objects, where each datapoint is a SceneInstanceDataset."""
 
     def __init__(self,
-                 basedir,
-                 downscale_factor=1,
-                 train_cameras=False
+                 train_cameras=False,
+                 basedir='',
+                 downscale_factor=1
                  ):
 
         self.instance_dir = basedir
@@ -189,5 +189,4 @@ class SxSceneDataset(torch.utils.data.Dataset):
 
 
 if __name__ == "__main__":
-    SxSceneDataset(r'C:\Users\viestell\Documents\data\sx\nerf_expr_driver_eval_seed_3_single_frame', 2)
     pass
