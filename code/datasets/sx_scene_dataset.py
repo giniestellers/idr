@@ -5,142 +5,112 @@ import numpy as np
 import glob
 import json
 import imageio
+import skimage
 import cv2
 import transformations
 
 import utils.general as utils
-from utils import rend_util
-
-
-def load_blender_data(basedir, downscale_factor=1):
-    metadata_file_paths = glob.glob(os.path.join(basedir, "meta_*.json"))
-
-    imgs = []
-    poses = []
-    metadata_dicts = []
-    camera_intrinsics = []
-    for json_path in metadata_file_paths:
-        with open(json_path, "r") as fp:
-            metadata = json.load(fp)
-
-
-        json_filename = os.path.splitext(os.path.basename(json_path))[0]
-        file_suffix = "_".join(json_filename.split("_")[1:])
-        img_path = os.path.join(basedir, "img_" + file_suffix + ".png")
-        mask_paths = []
-        mask_paths.append(os.path.join(basedir, "segm_face_" + file_suffix + ".png"))
-        mask_paths.append(os.path.join(basedir, "segm_top_empty_face_" + file_suffix + ".png"))
-        mask_paths.append(os.path.join(basedir, "segm_headwear_empty_face_" + file_suffix + ".png"))
-        mask_paths.append(os.path.join(basedir, "segm_glasses_face_" + file_suffix + ".png"))
-
-        if not os.path.exists(img_path):
-            continue
-        img = imageio.imread(img_path)
-        combined_mask = np.zeros(img.shape[:2], dtype=np.int32)
-        for mask_path in mask_paths:
-            if os.path.exists(mask_path):
-                combined_mask += imageio.imread(mask_path)
-        combined_mask = np.clip(combined_mask, 0, 255).astype(np.uint8)
-
-        img = np.dstack((img, combined_mask))
-        camera_location = np.reshape(metadata["cameras"][0]["location"], (3, 1))
-        camera_rotation = metadata["cameras"][0]["rotation"]
-
-        rotation_matrix = transformations.euler_matrix(*camera_rotation)[:3, :3]
-        pose = np.hstack((rotation_matrix, camera_location))
-
-        camera_focal_mm = metadata["cameras"][0]["fov"] / 100
-        frame_width_mm = 36
-        frame_width_pix = img.shape[1]
-        focal = frame_width_pix * (camera_focal_mm / frame_width_mm)
-
-        calib = {"f": float(focal), "b1": 0.0, "b2": 0.0, "cx": 0.0, "cy": 0.0,
-                             "h": img.shape[0], "w": img.shape[1]}
-        calib = CameraCalibration(calib)
-
-
-        imgs.append(img)
-        poses.append(pose)
-        metadata_dicts.append(metadata)
-        camera_intrinsics.append(calib)
-
-
-    fitted_sequence = MoAIParamSequence.load_from_synth_metadata(metadata_dicts)
-
-
-    imgs = np.array(imgs, np.uint8)
-    poses = np.array(poses).astype(np.float32)
-
-
-    if downscale_factor != 1:
-        H = img.shape[1] // 2**(downscale_factor - 1)
-        W = imgs.shape[2] // 2**(downscale_factor - 1)
-
-        downscaled_imgs = np.zeros((imgs.shape[0], H, W, 4))
-        for i, img in enumerate(imgs):
-            downscaled_imgs[i] = cv2.resize(img, (H, W), interpolation=cv2.INTER_AREA)
-            camera_intrinsics[i] = camera_intrinsics[i].get_scaled_to_img_size(W)
-        imgs = downscaled_imgs
-
-    return imgs, poses, camera_intrinsics, fitted_sequence
-
 
 class SxSceneDataset(torch.utils.data.Dataset):
     """Dataset for a class of objects, where each datapoint is a SceneInstanceDataset."""
 
     def __init__(self,
-                 train_cameras,
-                 data_dir,
-                 img_res,
-                 scan_id=0,
-                 cam_file=None
+                 basedir,
+                 downscale_factor=1,
+                 train_cameras=False
                  ):
 
-        self.instance_dir = os.path.join('../data', data_dir, 'scan{0}'.format(scan_id))
-
-        self.total_pixels = img_res[0] * img_res[1]
-        self.img_res = img_res
-
+        self.instance_dir = basedir
+        self.scale_matrix = None
         assert os.path.exists(self.instance_dir), "Data directory is empty"
 
         self.sampling_idx = None
+        self.img_res = None
         self.train_cameras = train_cameras
 
-        image_dir = '{0}/image'.format(self.instance_dir)
-        image_paths = sorted(utils.glob_imgs(image_dir))
-        mask_dir = '{0}/mask'.format(self.instance_dir)
-        mask_paths = sorted(utils.glob_imgs(mask_dir))
-
-        self.n_images = len(image_paths)
-
-        self.cam_file = '{0}/cameras.npz'.format(self.instance_dir)
-        if cam_file is not None:
-            self.cam_file = '{0}/{1}'.format(self.instance_dir, cam_file)
-
-        camera_dict = np.load(self.cam_file)
-        scale_mats = [camera_dict['scale_mat_%d' % idx].astype(np.float32) for idx in range(self.n_images)]
-        world_mats = [camera_dict['world_mat_%d' % idx].astype(np.float32) for idx in range(self.n_images)]
-
+        self.rgb_images = []
+        self.object_masks = []
         self.intrinsics_all = []
         self.pose_all = []
-        for scale_mat, world_mat in zip(scale_mats, world_mats):
-            P = world_mat @ scale_mat
-            P = P[:3, :4]
-            intrinsics, pose = rend_util.load_K_Rt_from_P(None, P)
+        metadata_file_paths = glob.glob(os.path.join(basedir, "meta_*.json"))
+        for json_path in metadata_file_paths:
+            with open(json_path, "r") as fp:
+                metadata = json.load(fp)
+
+            json_filename = os.path.splitext(os.path.basename(json_path))[0]
+            file_suffix = "_".join(json_filename.split("_")[1:])
+            img_path = os.path.join(basedir, "img_" + file_suffix + ".png")
+            H, W = 1, 1
+            mask_paths = []
+            mask_paths.append(os.path.join(basedir, "segm_face_" + file_suffix + ".png"))
+            mask_paths.append(os.path.join(basedir, "segm_top_empty_face_" + file_suffix + ".png"))
+            mask_paths.append(os.path.join(basedir, "segm_headwear_empty_face_" + file_suffix + ".png"))
+            mask_paths.append(os.path.join(basedir, "segm_glasses_face_" + file_suffix + ".png"))
+
+            # load image
+            assert os.path.exists(img_path), "missing rgb image"
+            img = imageio.imread(img_path)
+            img_shape = img.shape[:2]
+            if downscale_factor != 1:
+                H = img.shape[0] // 2**(downscale_factor - 1)
+                W = img.shape[1] // 2**(downscale_factor - 1)
+                downscaled_img = cv2.resize(img, (H, W), interpolation=cv2.INTER_AREA)
+                img = downscaled_img
+            img_res = img.shape[:2]
+            if self.img_res == None:
+                self.img_res = img_res
+            else:
+                assert img_res == self.img_res, "image sizes are not consistent accross cameras"
+            # pixel values between [-1,1]
+            img = skimage.img_as_float32(img)
+            img -= 0.5
+            img *= 2.
+            img = img.reshape(-1, 3)
+            self.rgb_images.append(torch.from_numpy(img).float())
+
+            # load mask
+            combined_mask = np.zeros(img_shape, dtype=np.int32)
+            for mask_path in mask_paths:
+                if os.path.exists(mask_path):
+                    combined_mask += imageio.imread(mask_path)
+            combined_mask = np.clip(combined_mask, 0, 255).astype(np.uint8)
+            if downscale_factor != 1:
+                downscaled_mask = cv2.resize(combined_mask, (H, W), interpolation=cv2.INTER_AREA)
+                combined_mask = downscaled_mask
+            assert combined_mask.shape[:2] == self.img_res, "size of image and mask inconsistent"
+            combined_mask = combined_mask > 127.5
+            combined_mask = combined_mask.reshape(-1)
+            self.object_masks.append(torch.from_numpy(combined_mask).bool())
+
+            # load camera pose
+            camera_location = np.reshape(metadata["cameras"][0]["location"], (3, 1))
+            camera_rotation = metadata["cameras"][0]["rotation"]
+            rotation_matrix = transformations.euler_matrix(*camera_rotation)[:3, :3]
+            pose = np.eye(4, dtype=np.float32)
+            pose[:3, :] = np.hstack((rotation_matrix, camera_location))
+            # might need to scale pose to unit sphere
+            self.pose_all.append(torch.from_numpy(pose))
+
+            # load camera parameters
+            camera_focal_mm = metadata["cameras"][0]["fov"] / 100
+            frame_width_mm = 36
+            frame_width_pix = self.img_res[1]
+            focal = frame_width_pix * (camera_focal_mm / frame_width_mm)
+            intrinsics = np.array([[float(focal), 0.0, 0.5*self.img_res[1]],
+                            [0, float(focal), 0.5*self.img_res[0]],
+                            [0, 0, 1]], dtype=np.float32)
             self.intrinsics_all.append(torch.from_numpy(intrinsics).float())
-            self.pose_all.append(torch.from_numpy(pose).float())
 
-        self.rgb_images = []
-        for path in image_paths:
-            rgb = rend_util.load_rgb(path)
-            rgb = rgb.reshape(3, -1).transpose(1, 0)
-            self.rgb_images.append(torch.from_numpy(rgb).float())
+        self.n_images = len(self.rgb_images)
+        self.total_pixels = self.img_res[0]*self.img_res[1]
+        self.scale_coordinate_frame()
 
-        self.object_masks = []
-        for path in mask_paths:
-            object_mask = rend_util.load_mask(path)
-            object_mask = object_mask.reshape(-1)
-            self.object_masks.append(torch.from_numpy(object_mask).bool())
+    def scale_coordinate_frame(self):
+        if self.scale_matrix is None:
+            self.scale_matrix = self.get_scale_mat()
+            for i in range(self.n_images):
+                pose = self.pose_all[i] @ self.scale_matrix
+                self.pose_all[i] = pose
 
     def __len__(self):
         return self.n_images
@@ -194,40 +164,30 @@ class SxSceneDataset(torch.utils.data.Dataset):
             self.sampling_idx = torch.randperm(self.total_pixels)[:sampling_size]
 
     def get_scale_mat(self):
-        return np.load(self.cam_file)['scale_mat_0']
+        if self.scale_matrix is None:
+            camera_centers = np.stack(self.pose_all, 0)[:, :3, 3]
+            rig_center = np.mean(camera_centers, 0, keepdims=True)
+            centered_cameras = camera_centers - np.repeat(rig_center, self.n_images, axis=0)
+            scale = np.max(np.linalg.norm(centered_cameras, ord=2, axis=-1))
+            self.scale_matrix = scale * np.eye(4)
+            self.scale_matrix[:3, 3] = rig_center[0]
+        return self.scale_matrix
 
     def get_gt_pose(self, scaled=False):
         # Load gt pose without normalization to unit sphere
-        camera_dict = np.load(self.cam_file)
-        world_mats = [camera_dict['world_mat_%d' % idx].astype(np.float32) for idx in range(self.n_images)]
-        scale_mats = [camera_dict['scale_mat_%d' % idx].astype(np.float32) for idx in range(self.n_images)]
-
-        pose_all = []
-        for scale_mat, world_mat in zip(scale_mats, world_mats):
-            P = world_mat
-            if scaled:
-                P = world_mat @ scale_mat
-            P = P[:3, :4]
-            _, pose = rend_util.load_K_Rt_from_P(None, P)
-            pose_all.append(torch.from_numpy(pose).float())
-
-        return torch.cat([p.float().unsqueeze(0) for p in pose_all], 0)
+        if scaled:
+            pose_all = list(self.pose_all)
+        else:
+            inverse_scale = 1.0/self.scale_matrix[0,0]
+            inverse_scale_matrix = inverse_scale * np.eye(4)
+            inverse_scale_matrix[:3, 3] = - inverse_scale * self.scale_matrix[:3, 3]
+            pose_all = [ pose @ inverse_scale_matrix for pose in self.pose_all]
+        return pose_all
 
     def get_pose_init(self):
-        # get noisy initializations obtained with the linear method
-        cam_file = '{0}/cameras_linear_init.npz'.format(self.instance_dir)
-        camera_dict = np.load(cam_file)
-        scale_mats = [camera_dict['scale_mat_%d' % idx].astype(np.float32) for idx in range(self.n_images)]
-        world_mats = [camera_dict['world_mat_%d' % idx].astype(np.float32) for idx in range(self.n_images)]
+        return list(self.pose_all)
 
-        init_pose = []
-        for scale_mat, world_mat in zip(scale_mats, world_mats):
-            P = world_mat @ scale_mat
-            P = P[:3, :4]
-            _, pose = rend_util.load_K_Rt_from_P(None, P)
-            init_pose.append(pose)
-        init_pose = torch.cat([torch.Tensor(pose).float().unsqueeze(0) for pose in init_pose], 0).cuda()
-        init_quat = rend_util.rot_to_quat(init_pose[:, :3, :3])
-        init_quat = torch.cat([init_quat, init_pose[:, :3, 3]], 1)
 
-        return init_quat
+if __name__ == "__main__":
+    SxSceneDataset(r'C:\Users\viestell\Documents\data\sx\nerf_expr_driver_eval_seed_3_single_frame', 2)
+    pass
