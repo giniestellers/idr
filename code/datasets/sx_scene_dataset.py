@@ -15,14 +15,14 @@ class SxSceneDataset(torch.utils.data.Dataset):
     """Dataset for a class of objects, where each datapoint is a SceneInstanceDataset."""
 
     def __init__(self,
-                 train_cameras=False,
-                 basedir='',
+                 train_cameras,
+                 basedir = r'C:\\Users\\viestell\\Documents\\data\\sx\\nerf_expr_driver_eval_seed_3_single_frame',
                  downscale_factor=1
                  ):
 
         self.instance_dir = basedir
         self.scale_matrix = None
-        assert os.path.exists(self.instance_dir), "Data directory is empty"
+        assert os.path.exists(self.instance_dir), "Data directory is empty {}".format(self.instance_dir)
 
         self.sampling_idx = None
         self.img_res = None
@@ -83,21 +83,21 @@ class SxSceneDataset(torch.utils.data.Dataset):
             self.object_masks.append(torch.from_numpy(combined_mask).bool())
 
             # load camera pose
-            camera_location = np.reshape(metadata["cameras"][0]["location"], (3, 1))
+            camera_location = np.reshape(metadata["cameras"][0]["location"], (3, 1)).astype(np.float32)
             camera_rotation = metadata["cameras"][0]["rotation"]
-            rotation_matrix = transformations.euler_matrix(*camera_rotation)[:3, :3]
+            rotation_matrix = transformations.euler_matrix(*camera_rotation)[:3, :3].astype(np.float32)
             pose = np.eye(4, dtype=np.float32)
             pose[:3, :] = np.hstack((rotation_matrix, camera_location))
             # might need to scale pose to unit sphere
-            self.pose_all.append(torch.from_numpy(pose))
+            self.pose_all.append(torch.from_numpy(pose).float())
 
             # load camera parameters
-            camera_focal_mm = metadata["cameras"][0]["fov"] / 100
-            frame_width_mm = 36
-            frame_width_pix = self.img_res[1]
+            camera_focal_mm = float(metadata["cameras"][0]["fov"]) / 100.0
+            frame_width_mm = 36.0
+            frame_width_pix = float(self.img_res[1])
             focal = frame_width_pix * (camera_focal_mm / frame_width_mm)
-            intrinsics = np.array([[float(focal), 0.0, 0.5*self.img_res[1]],
-                            [0, float(focal), 0.5*self.img_res[0]],
+            intrinsics = np.array([[float(focal), 0.0, 0.5*float(self.img_res[1])],
+                            [0, float(focal), 0.5*float(self.img_res[0])],
                             [0, 0, 1]], dtype=np.float32)
             self.intrinsics_all.append(torch.from_numpy(intrinsics).float())
 
@@ -179,9 +179,9 @@ class SxSceneDataset(torch.utils.data.Dataset):
             pose_all = list(self.pose_all)
         else:
             inverse_scale = 1.0/self.scale_matrix[0,0]
-            inverse_scale_matrix = inverse_scale * np.eye(4)
+            inverse_scale_matrix = inverse_scale * np.eye(4, dtype=np.float32)
             inverse_scale_matrix[:3, 3] = - inverse_scale * self.scale_matrix[:3, 3]
-            pose_all = [ pose @ inverse_scale_matrix for pose in self.pose_all]
+            pose_all = [pose @ inverse_scale_matrix for pose in self.pose_all]
         return pose_all
 
     def get_pose_init(self):
