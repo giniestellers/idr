@@ -9,8 +9,6 @@ import skimage
 import cv2
 import transformations
 
-import utils.general as utils
-
 class SxSceneDataset(torch.utils.data.Dataset):
     """Dataset for a class of objects, where each datapoint is a SceneInstanceDataset."""
 
@@ -87,7 +85,8 @@ class SxSceneDataset(torch.utils.data.Dataset):
             camera_rotation = metadata["cameras"][0]["rotation"]
             rotation_matrix = transformations.euler_matrix(*camera_rotation)[:3, :3].astype(np.float32)
             pose = np.eye(4, dtype=np.float32)
-            pose[:3, :] = np.hstack((rotation_matrix, camera_location))
+            pose[:3, :] = np.hstack((rotation_matrix,
+                                     camera_location))
             # might need to scale pose to unit sphere
             self.pose_all.append(torch.from_numpy(pose).float())
 
@@ -96,21 +95,17 @@ class SxSceneDataset(torch.utils.data.Dataset):
             frame_width_mm = 36.0
             frame_width_pix = float(self.img_res[1])
             focal = frame_width_pix * (camera_focal_mm / frame_width_mm)
-            intrinsics = np.array([[float(focal), 0.0, 0.5*float(self.img_res[1])],
-                            [0, float(focal), 0.5*float(self.img_res[0])],
+            intrinsics = np.array([[focal, 0.0, 0.5*float(self.img_res[1])],
+                            [0, focal, 0.5*float(self.img_res[0])],
                             [0, 0, 1]], dtype=np.float32)
             self.intrinsics_all.append(torch.from_numpy(intrinsics).float())
 
         self.n_images = len(self.rgb_images)
         self.total_pixels = self.img_res[0]*self.img_res[1]
+        self.scaled = False
+        self.unscaled_pose_all = list(self.pose_all)
+        self.unscaled_intrinsics_all = list(self.intrinsics_all)
         self.scale_coordinate_frame()
-
-    def scale_coordinate_frame(self):
-        if self.scale_matrix is None:
-            self.scale_matrix = self.get_scale_mat()
-            for i in range(self.n_images):
-                pose = self.pose_all[i] @ self.scale_matrix
-                self.pose_all[i] = pose
 
     def __len__(self):
         return self.n_images
@@ -163,25 +158,53 @@ class SxSceneDataset(torch.utils.data.Dataset):
         else:
             self.sampling_idx = torch.randperm(self.total_pixels)[:sampling_size]
 
+    def K_Rt_from_P(self, P):
+        out = cv2.decomposeProjectionMatrix(P)
+        K = out[0]
+        K = K/K[2,2]
+        R = out[1]
+        #R = R.transpose()
+        t = out[2]
+        t = (t[:3] / t[3])[:,0]
+        #t = -np.dot(R, t)
+
+        intrinsics = np.eye(4)
+        intrinsics[:3, :3] = K
+
+        pose = np.eye(4, dtype=np.float32)
+        pose[:3, :3] = R
+        pose[:3,3] = t
+        return intrinsics, pose
+
     def get_scale_mat(self):
         if self.scale_matrix is None:
-            camera_centers = np.stack(self.pose_all, 0)[:, :3, 3]
-            rig_center = np.mean(camera_centers, 0, keepdims=True)
-            centered_cameras = camera_centers - np.repeat(rig_center, self.n_images, axis=0)
-            scale = np.max(np.linalg.norm(centered_cameras, ord=2, axis=-1))
-            self.scale_matrix = scale * np.eye(4)
+            camera_centers = torch.stack(self.pose_all, 0)[:, :3, 3]
+            rig_center = torch.mean(camera_centers, 0, keepdims=True)
+            centered_cameras = camera_centers - rig_center.expand(self.n_images, -1)
+            scale = torch.max(torch.norm(centered_cameras, p=2, dim=-1))
+            self.scale_matrix = scale * torch.eye(4, dtype=torch.float32)
             self.scale_matrix[:3, 3] = rig_center[0]
+            self.scale_matrix[3, 3] = 1
         return self.scale_matrix
+
+    def scale_coordinate_frame(self):
+        if not self.scaled:
+            if self.scale_matrix is None:
+                self.scale_matrix = self.get_scale_mat()
+            for i in range(self.n_images):
+                P = self.pose_all[i] @ self.scale_matrix
+                P = P[:3, :4].numpy()
+                intrinsics, pose = self.K_Rt_from_P(P)
+                self.intrinsics_all[i] = torch.from_numpy(intrinsics).float()
+                self.pose_all[i] = torch.from_numpy(pose).float()
+            self.scaled = True
 
     def get_gt_pose(self, scaled=False):
         # Load gt pose without normalization to unit sphere
         if scaled:
             pose_all = list(self.pose_all)
         else:
-            inverse_scale = 1.0/self.scale_matrix[0,0]
-            inverse_scale_matrix = inverse_scale * np.eye(4, dtype=np.float32)
-            inverse_scale_matrix[:3, 3] = - inverse_scale * self.scale_matrix[:3, 3]
-            pose_all = [pose @ inverse_scale_matrix for pose in self.pose_all]
+            pose_all = list(self.unscaled_pose_all)
         return pose_all
 
     def get_pose_init(self):
@@ -189,4 +212,17 @@ class SxSceneDataset(torch.utils.data.Dataset):
 
 
 if __name__ == "__main__":
+
+    import matplotlib.pyplot as plt
+    dataset = SxSceneDataset(False)
+    camera_centers = torch.stack(dataset.pose_all, 0)[:, :3, 3]
+    rig_center = torch.mean(camera_centers, 0, keepdim=True).numpy()
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+
+    camera_centers = camera_centers.numpy()
+    ax.scatter(camera_centers[:,0], camera_centers[:, 1], camera_centers[:, 2], marker='^')
+    ax.scatter(rig_center[:, 0], rig_center[:, 1], rig_center[:, 2], marker='o')
+    plt.show()
+
     pass
