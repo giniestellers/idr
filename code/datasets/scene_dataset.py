@@ -2,6 +2,9 @@ import os
 import torch
 import numpy as np
 
+import sys
+sys.path.append(r'C:\Users\viestell\Documents\repos\idr\code')
+
 import utils.general as utils
 from utils import rend_util
 
@@ -151,3 +154,26 @@ class SceneDataset(torch.utils.data.Dataset):
         init_quat = torch.cat([init_quat, init_pose[:, :3, 3]], 1)
 
         return init_quat
+
+
+if __name__ == "__main__":
+
+    import matplotlib.pyplot as plt
+
+    conf = {
+            "data_dir": "DTU",
+            "img_res": [1200, 1600],
+            "scan_id": 65
+    }
+    dataset = SceneDataset(False, **conf)
+    camera_centers = torch.stack(dataset.pose_all, 0)[:, :3, 3]
+    rig_center = torch.mean(camera_centers, 0, keepdim=True).numpy()
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+
+    camera_centers = camera_centers.numpy()
+    ax.scatter(camera_centers[:,0], camera_centers[:, 1], camera_centers[:, 2], marker='^')
+    ax.scatter(rig_center[:, 0], rig_center[:, 1], rig_center[:, 2], marker='o')
+    plt.show()
+
+    pass
